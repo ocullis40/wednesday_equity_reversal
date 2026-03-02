@@ -1,3 +1,5 @@
+import os
+import csv
 from datetime import date
 
 import yfinance as yf
@@ -113,3 +115,43 @@ def download_intraday_data(symbol: str) -> pd.DataFrame:
     df = ticker.history(period="60d", interval="30m")
     df.index = df.index.tz_convert("America/New_York")
     return df
+
+def analyze_symbol(symbol: str, output_dir: str = "output") -> list:
+    """Run full analysis for a single symbol. Returns list of result dicts."""
+    df = download_intraday_data(symbol)
+    periods = find_valid_periods(df)
+
+    results = []
+    for fri, mon, tue, wed in periods:
+        prices = extract_prices(df, fri, tue, wed)
+        if not prices:
+            continue
+
+        retracement = compute_retracement(
+            prices["friday_close"], prices["tuesday_10am"],
+            prices["wednesday_high"], prices["wednesday_low"],
+        )
+
+        if retracement["move_direction"] == "flat":
+            continue
+
+        row = {
+            "symbol": symbol,
+            "friday_date": str(fri),
+            "tuesday_date": str(tue),
+            "wednesday_date": str(wed),
+            **prices,
+            **retracement,
+        }
+        results.append(row)
+
+    # Write CSV
+    os.makedirs(output_dir, exist_ok=True)
+    if results:
+        csv_path = os.path.join(output_dir, f"{symbol}.csv")
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=results[0].keys())
+            writer.writeheader()
+            writer.writerows(results)
+
+    return results

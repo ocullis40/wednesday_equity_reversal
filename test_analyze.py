@@ -1,5 +1,6 @@
+import os
 import pandas as pd
-from analyze import extract_prices, download_intraday_data, find_valid_periods, compute_retracement
+from analyze import extract_prices, download_intraday_data, find_valid_periods, compute_retracement, analyze_symbol
 
 def test_download_returns_dataframe():
     df = download_intraday_data("SPY")
@@ -48,3 +49,13 @@ def test_retracement_down_move_partial():
 def test_retracement_flat_move():
     result = compute_retracement(100.0, 100.02, 100.5, 99.5)
     assert result["move_direction"] == "flat"
+
+def test_analyze_symbol_produces_csv():
+    results = analyze_symbol("SPY", output_dir="output")
+    assert isinstance(results, list)
+    assert len(results) > 0
+    assert os.path.exists("output/SPY.csv")
+    # Each result row has required keys
+    for row in results:
+        assert "friday_date" in row
+        assert "retracement_pct" in row
