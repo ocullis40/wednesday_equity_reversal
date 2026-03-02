@@ -225,3 +225,34 @@ def print_summary(summary: dict):
     for sym, stats in sorted(summary["per_symbol"].items()):
         print(f"  {sym:>6s}: {stats['hits']}/{stats['total']} = {stats['hit_rate']}%")
     print("=" * 60)
+
+
+def write_summary_csv(summary: dict, output_dir: str = "output"):
+    """Write aggregate summary to CSV."""
+    csv_path = os.path.join(output_dir, "summary.csv")
+    rows = []
+    for sym, stats in sorted(summary["per_symbol"].items()):
+        rows.append({
+            "symbol": sym,
+            "total_periods": stats["total"],
+            "hits_90pct": stats["hits"],
+            "hit_rate_pct": stats["hit_rate"],
+        })
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["symbol", "total_periods", "hits_90pct", "hit_rate_pct"])
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"\nSummary CSV written to {csv_path}")
+
+
+if __name__ == "__main__":
+    all_results = []
+    for symbol in SYMBOLS:
+        print(f"Analyzing {symbol}...")
+        results = analyze_symbol(symbol)
+        all_results.extend(results)
+        print(f"  {symbol}: {len(results)} valid periods found")
+
+    summary = compute_summary(all_results)
+    print_summary(summary)
+    write_summary_csv(summary)
