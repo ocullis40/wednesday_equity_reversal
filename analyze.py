@@ -155,3 +155,73 @@ def analyze_symbol(symbol: str, output_dir: str = "output") -> list:
             writer.writerows(results)
 
     return results
+
+
+def compute_summary(all_results: list) -> dict:
+    """Compute aggregate statistics across all symbols."""
+    total = len(all_results)
+    hits = [r for r in all_results if r["retraced_90pct"]]
+    hit_rate = (len(hits) / total * 100) if total > 0 else 0
+
+    retrace_values = [r["retracement_pct"] for r in all_results]
+    avg_retracement = np.mean(retrace_values) if retrace_values else 0
+
+    # Per-symbol breakdown
+    per_symbol = {}
+    for r in all_results:
+        sym = r["symbol"]
+        if sym not in per_symbol:
+            per_symbol[sym] = {"total": 0, "hits": 0}
+        per_symbol[sym]["total"] += 1
+        if r["retraced_90pct"]:
+            per_symbol[sym]["hits"] += 1
+    for sym in per_symbol:
+        s = per_symbol[sym]
+        s["hit_rate"] = round(s["hits"] / s["total"] * 100, 2) if s["total"] > 0 else 0
+
+    # Distribution buckets
+    buckets = {"0-25%": 0, "25-50%": 0, "50-75%": 0, "75-90%": 0, "90-100%": 0, ">100%": 0}
+    for pct in retrace_values:
+        if pct > 100:
+            buckets[">100%"] += 1
+        elif pct >= 90:
+            buckets["90-100%"] += 1
+        elif pct >= 75:
+            buckets["75-90%"] += 1
+        elif pct >= 50:
+            buckets["50-75%"] += 1
+        elif pct >= 25:
+            buckets["25-50%"] += 1
+        else:
+            buckets["0-25%"] += 1
+
+    return {
+        "total_periods": total,
+        "hit_count": len(hits),
+        "hit_rate": round(hit_rate, 2),
+        "avg_retracement": round(float(avg_retracement), 2),
+        "per_symbol": per_symbol,
+        "distribution": buckets,
+    }
+
+
+def print_summary(summary: dict):
+    """Print summary statistics to console."""
+    print("\n" + "=" * 60)
+    print("WEDNESDAY REVERSAL ANALYSIS — SUMMARY")
+    print("=" * 60)
+    print(f"Total valid Fri-Wed periods analyzed: {summary['total_periods']}")
+    print(f"Periods with >= 90% retracement:      {summary['hit_count']}")
+    print(f"Overall hit rate:                      {summary['hit_rate']}%")
+    print(f"Average retracement:                   {summary['avg_retracement']}%")
+
+    print("\n--- Distribution ---")
+    for bucket, count in summary["distribution"].items():
+        pct = round(count / summary["total_periods"] * 100, 1) if summary["total_periods"] > 0 else 0
+        bar = "#" * int(pct / 2)
+        print(f"  {bucket:>8s}: {count:3d} ({pct:5.1f}%) {bar}")
+
+    print("\n--- Per-Symbol Hit Rates ---")
+    for sym, stats in sorted(summary["per_symbol"].items()):
+        print(f"  {sym:>6s}: {stats['hits']}/{stats['total']} = {stats['hit_rate']}%")
+    print("=" * 60)

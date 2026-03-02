@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from analyze import extract_prices, download_intraday_data, find_valid_periods, compute_retracement, analyze_symbol
+from analyze import extract_prices, download_intraday_data, find_valid_periods, compute_retracement, analyze_symbol, compute_summary
 
 def test_download_returns_dataframe():
     df = download_intraday_data("SPY")
@@ -59,3 +59,16 @@ def test_analyze_symbol_produces_csv():
     for row in results:
         assert "friday_date" in row
         assert "retracement_pct" in row
+
+def test_compute_summary():
+    fake_results = [
+        {"symbol": "SPY", "retracement_pct": 95.0, "retraced_90pct": True, "move_direction": "up"},
+        {"symbol": "SPY", "retracement_pct": 40.0, "retraced_90pct": False, "move_direction": "down"},
+        {"symbol": "QQQ", "retracement_pct": 92.0, "retraced_90pct": True, "move_direction": "up"},
+    ]
+    summary = compute_summary(fake_results)
+    assert summary["total_periods"] == 3
+    assert summary["hit_count"] == 2
+    assert abs(summary["hit_rate"] - 66.67) < 0.1
+    assert len(summary["per_symbol"]) == 2
+    assert len(summary["distribution"]) > 0
