@@ -66,6 +66,47 @@ def extract_prices(df: pd.DataFrame, friday, tuesday, wednesday) -> dict:
         "wednesday_low": wednesday_low,
     }
 
+def compute_retracement(friday_close: float, tuesday_10am: float,
+                        wednesday_high: float, wednesday_low: float) -> dict:
+    """Compute retracement metrics for a Fri-Wed period.
+
+    Args:
+        friday_close: Friday closing price
+        tuesday_10am: Tuesday 10:00 AM Eastern price
+        wednesday_high: Wednesday intraday high
+        wednesday_low: Wednesday intraday low
+
+    Returns dict with move, move_direction, retracement_price, retracement_pct, retraced_90pct.
+    """
+    move = tuesday_10am - friday_close
+
+    # Flat threshold: < $0.05 or < 0.05%
+    if abs(move) < 0.05 or (friday_close > 0 and abs(move) / friday_close < 0.0005):
+        return {
+            "move": move,
+            "move_direction": "flat",
+            "retracement_price": None,
+            "retracement_pct": None,
+            "retraced_90pct": None,
+        }
+
+    if move > 0:  # Price went UP
+        direction = "up"
+        retracement_price = wednesday_low
+        retracement_pct = (tuesday_10am - wednesday_low) / move * 100
+    else:  # Price went DOWN
+        direction = "down"
+        retracement_price = wednesday_high
+        retracement_pct = (wednesday_high - tuesday_10am) / abs(move) * 100
+
+    return {
+        "move": move,
+        "move_direction": direction,
+        "retracement_price": retracement_price,
+        "retracement_pct": round(retracement_pct, 2),
+        "retraced_90pct": retracement_pct >= 90.0,
+    }
+
 def download_intraday_data(symbol: str) -> pd.DataFrame:
     """Download 60 days of 30-minute intraday data for a symbol."""
     ticker = yf.Ticker(symbol)
