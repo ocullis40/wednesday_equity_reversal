@@ -1,11 +1,204 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-from analyze import SYMBOLS, analyze_symbol, compute_summary
+import json
+import os
+from datetime import date, datetime, timedelta
+from analyze import SYMBOLS, INDEX_SYMBOLS, analyze_symbol, compute_summary, download_intraday_data, min_move_pct
+
+SIGNALS_FILE = os.path.join(os.path.dirname(__file__), "current_signals.json")
 
 st.set_page_config(page_title="Wednesday Reversal", layout="wide")
 st.title("Wednesday Equity Reversal Dashboard")
 
+
+# --- Current Signals ---
+st.subheader("Current Signals (Mon 2 PM)")
+
+
+def load_saved_signals():
+    """Load persisted signals from disk."""
+    if not os.path.exists(SIGNALS_FILE):
+        return None
+    with open(SIGNALS_FILE, "r") as f:
+        data = json.load(f)
+    # Expire after Wednesday 4 PM
+    expires = date.fromisoformat(data["wednesday"])
+    now = datetime.now()
+    if now.date() > expires or (now.date() == expires and now.hour >= 16):
+        os.remove(SIGNALS_FILE)
+        return None
+    return data
+
+
+def save_signals(signals, friday, monday, wednesday):
+    """Persist confirmed signals to disk."""
+    data = {
+        "friday": str(friday),
+        "monday": str(monday),
+        "wednesday": str(wednesday),
+        "signals": signals,
+    }
+    with open(SIGNALS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+@st.cache_data(ttl=300)
+def scan_current_signals():
+    today = date.today()
+    # Find most recent Friday
+    days_since_friday = (today.weekday() - 4) % 7
+    friday = today - timedelta(days=days_since_friday)
+    monday = friday + timedelta(days=3)
+    wednesday = friday + timedelta(days=5)
+
+    signals = []
+    for symbol in SYMBOLS:
+        try:
+            df = download_intraday_data(symbol)
+            fri_data = df[df.index.date == friday]
+            if fri_data.empty:
+                continue
+            fri_close = float(fri_data["Close"].iloc[-1])
+
+            mon_data = df[df.index.date == monday]
+            if mon_data.empty:
+                continue
+            mon_2pm = mon_data.between_time("13:30", "14:00")
+            if mon_2pm.empty:
+                continue
+            signal_price = float(mon_2pm["Close"].iloc[-1])
+
+            move_pct = (signal_price - fri_close) / fri_close * 100
+            threshold = min_move_pct(symbol) * 100
+            if abs(move_pct) < threshold:
+                continue
+
+            direction = "UP" if move_pct > 0 else "DOWN"
+            trade = "Short" if direction == "UP" else "Long"
+
+            # Entry price after 0.2% continuation
+            if direction == "UP":
+                entry_price = signal_price * 1.002
+            else:
+                entry_price = signal_price * 0.998
+
+            # Check if 0.2% continuation happened in Mon afternoon bars
+            mon_after = mon_data.between_time("14:00", "16:00")
+            confirmed = False
+            if direction == "UP":
+                for _, bar in mon_after.iterrows():
+                    if float(bar["High"]) >= entry_price:
+                        confirmed = True
+                        break
+            else:
+                for _, bar in mon_after.iterrows():
+                    if float(bar["Low"]) <= entry_price:
+                        confirmed = True
+                        break
+
+            if not confirmed:
+                continue
+
+            # Target and stop from the entry price
+            if direction == "UP":
+                target_price = entry_price * 0.98
+                stop_price = entry_price * 1.015
+            else:
+                target_price = entry_price * 1.02
+                stop_price = entry_price * 0.985
+
+            signals.append({
+                "Symbol": symbol,
+                "Trade": f"🔴 {trade}" if trade == "Short" else f"🟢 {trade}",
+                "Fri Close": round(fri_close, 2),
+                "Signal (2 PM)": round(signal_price, 2),
+                "Move %": round(move_pct, 2),
+                "Entry (+0.2%)": round(entry_price, 2),
+                "Target (2%)": round(target_price, 2),
+                "Stop (1.5%)": round(stop_price, 2),
+            })
+        except Exception:
+            continue
+    return signals, friday, monday, wednesday
+
+
+# Load saved signals or scan for new ones
+saved = load_saved_signals()
+if saved:
+    signals = saved["signals"]
+    sig_friday = saved["friday"]
+    sig_monday = saved["monday"]
+else:
+    signals, sig_friday, sig_monday, sig_wednesday = scan_current_signals()
+    if signals:
+        save_signals(signals, sig_friday, sig_monday, sig_wednesday)
+
+if signals:
+    st.caption(f"Friday {sig_friday} → Monday {sig_monday} | Expires Wednesday close")
+
+    # Ensure editable fields exist on each signal
+    for s in signals:
+        s.setdefault("Actual Entry", None)
+        s.setdefault("Actual Exit", None)
+
+    sig_df = pd.DataFrame(signals)
+
+    # Compute Net Gain %
+    def calc_net_gain(row):
+        entry = row.get("Actual Entry")
+        exit_ = row.get("Actual Exit")
+        if entry and exit_ and entry > 0:
+            if "Short" in str(row["Trade"]):
+                return round((entry - exit_) / entry * 100, 2)
+            else:
+                return round((exit_ - entry) / entry * 100, 2)
+        return None
+
+    for s in signals:
+        s["Net Gain %"] = calc_net_gain(s)
+
+    column_config = {
+        "Symbol": st.column_config.TextColumn(width="small", disabled=True),
+        "Trade": st.column_config.TextColumn(width="small", disabled=True),
+        "Fri Close": st.column_config.NumberColumn(format="%.2f", disabled=True),
+        "Signal (2 PM)": st.column_config.NumberColumn(format="%.2f", disabled=True),
+        "Move %": st.column_config.NumberColumn(format="%.2f", disabled=True),
+        "Entry (+0.2%)": st.column_config.NumberColumn(format="%.2f", disabled=True),
+        "Target (2%)": st.column_config.NumberColumn(format="%.2f", disabled=True),
+        "Stop (1.5%)": st.column_config.NumberColumn(format="%.2f", disabled=True),
+        "Actual Entry": st.column_config.NumberColumn(format="%.2f"),
+        "Actual Exit": st.column_config.NumberColumn(format="%.2f"),
+        "Net Gain %": st.column_config.NumberColumn(format="%.2f", disabled=True),
+    }
+
+    edited_df = st.data_editor(
+        sig_df,
+        column_config=column_config,
+        use_container_width=False,
+        hide_index=True,
+        height=(len(signals) + 1) * 35 + 3,
+        key="signals_editor",
+    )
+
+    # Persist edits back to JSON
+    if edited_df is not None:
+        updated_signals = edited_df.to_dict(orient="records")
+        # Recalculate Net Gain from edited values
+        for s in updated_signals:
+            s["Net Gain %"] = calc_net_gain(s)
+        current_saved = load_saved_signals()
+        if current_saved:
+            current_saved["signals"] = updated_signals
+            with open(SIGNALS_FILE, "w") as f:
+                json.dump(current_saved, f, indent=2)
+else:
+    st.info("No confirmed signals. Signals appear after Monday 2 PM.")
+
+st.divider()
+
+# --- Historical Analysis ---
+st.subheader("Historical Analysis")
 
 @st.cache_data
 def run_analysis():
