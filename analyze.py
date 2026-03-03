@@ -155,6 +155,7 @@ def compute_retracement(friday_close: float, tuesday_10am: float,
         "retraced_90pct": move_retraced_pct >= 90.0,
     }
 
+CONFIRMATION_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5]
 FIXED_TARGETS = [1.0, 2.0, 3.0, 5.0]
 WED_CHECKPOINTS = ["09:30", "10:00", "10:30", "11:00", "11:30", "12:00",
                    "12:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30", "16:00"]
@@ -210,8 +211,172 @@ def analyze_wednesday_intraday(df: pd.DataFrame, wednesday, entry_price: float,
     return result
 
 
+def analyze_confirmation_thresholds(df: pd.DataFrame, wednesday, entry_price: float,
+                                     direction: str, prefix: str,
+                                     scan_from_date=None, scan_from_time="09:30") -> dict:
+    """Analyze confirmation thresholds for a triggered trade.
+
+    Scans bars from entry time through Wednesday close:
+    1. Check if price continues in the move direction by threshold% (confirmation)
+    2. If confirmed, race target (2%) vs stop (1.5%) from confirmation price through Wed close
+    3. If neither hit by Wednesday close, record the expired P&L %
+
+    Args:
+        df: Full intraday DataFrame
+        wednesday: Wednesday date
+        entry_price: The entry price (mon2pm, tue10am, or tue12pm)
+        direction: 'up' or 'down' - the move direction
+        prefix: Timeframe prefix for key naming
+        scan_from_date: Date to start scanning for confirmation (default: wednesday)
+        scan_from_time: Time to start scanning on scan_from_date (e.g. "14:00")
+
+    Returns dict with keys per threshold for both reversal and continuation trades.
+    """
+    if scan_from_date is None:
+        scan_from_date = wednesday
+
+    # Build scan range: from entry time through end of Wednesday
+    scan_dates = sorted({d for d in df.index.date if scan_from_date <= d <= wednesday})
+    if not scan_dates:
+        return {}
+
+    # Collect all bars from scan_from_date/time through end of Wednesday
+    scan_bars = pd.DataFrame()
+    for d in scan_dates:
+        day_data = df[df.index.date == d]
+        if d == scan_from_date:
+            day_data = day_data.between_time(scan_from_time, "16:00")
+        scan_bars = pd.concat([scan_bars, day_data])
+    scan_bars = scan_bars.sort_index()
+
+    if scan_bars.empty:
+        return {}
+
+    # Wednesday close for expired P&L calculation
+    wed_data = df[df.index.date == wednesday]
+    if wed_data.empty:
+        return {}
+    wed_close = float(wed_data.sort_index()["Close"].iloc[-1])
+
+    result = {}
+    for thresh in CONFIRMATION_THRESHOLDS:
+        reached_key = f"{prefix}_conf_{thresh}_reached"
+        won_key = f"{prefix}_conf_{thresh}_won"
+        stopped_key = f"{prefix}_conf_{thresh}_stopped"
+        expired_key = f"{prefix}_conf_{thresh}_expired_pct"
+
+        if direction == "up":
+            conf_level = entry_price * (1 + thresh / 100)
+        else:
+            conf_level = entry_price * (1 - thresh / 100)
+
+        confirmed = False
+        outcome = None
+        expired_pct = None
+        cont_outcome = None
+        cont_expired_pct = None
+
+        for i, (_, bar) in enumerate(scan_bars.iterrows()):
+            if not confirmed:
+                if direction == "up" and float(bar["High"]) >= conf_level:
+                    confirmed = True
+                elif direction == "down" and float(bar["Low"]) <= conf_level:
+                    confirmed = True
+
+                if confirmed:
+                    conf_price = conf_level
+
+                    # Bars from confirmation through end of Wednesday
+                    remaining = scan_bars.iloc[i:]
+                    # Only include up through end of Wednesday
+                    remaining = remaining[remaining.index.date <= wednesday]
+
+                    # --- Reversal trade (fade the move) ---
+                    if direction == "up":
+                        rev_target = conf_price * 0.98
+                        rev_stop = conf_price * 1.015
+                    else:
+                        rev_target = conf_price * 1.02
+                        rev_stop = conf_price * 0.985
+
+                    for _, rb in remaining.iterrows():
+                        if direction == "up":
+                            if float(rb["Low"]) <= rev_target:
+                                outcome = "won"
+                                break
+                            if float(rb["High"]) >= rev_stop:
+                                outcome = "stopped"
+                                break
+                        else:
+                            if float(rb["High"]) >= rev_target:
+                                outcome = "won"
+                                break
+                            if float(rb["Low"]) <= rev_stop:
+                                outcome = "stopped"
+                                break
+                    if outcome is None:
+                        outcome = "expired"
+                        if direction == "up":
+                            expired_pct = round((conf_price - wed_close) / conf_price * 100, 2)
+                        else:
+                            expired_pct = round((wed_close - conf_price) / conf_price * 100, 2)
+
+                    # --- Continuation trade (ride the move) ---
+                    if direction == "up":
+                        cont_target = conf_price * 1.02
+                        cont_stop = conf_price * 0.985
+                    else:
+                        cont_target = conf_price * 0.98
+                        cont_stop = conf_price * 1.015
+
+                    for _, rb in remaining.iterrows():
+                        if direction == "up":
+                            if float(rb["High"]) >= cont_target:
+                                cont_outcome = "won"
+                                break
+                            if float(rb["Low"]) <= cont_stop:
+                                cont_outcome = "stopped"
+                                break
+                        else:
+                            if float(rb["Low"]) <= cont_target:
+                                cont_outcome = "won"
+                                break
+                            if float(rb["High"]) >= cont_stop:
+                                cont_outcome = "stopped"
+                                break
+                    if cont_outcome is None:
+                        cont_outcome = "expired"
+                        if direction == "up":
+                            cont_expired_pct = round((wed_close - conf_price) / conf_price * 100, 2)
+                        else:
+                            cont_expired_pct = round((conf_price - wed_close) / conf_price * 100, 2)
+
+                    break
+
+        result[reached_key] = confirmed
+        result[won_key] = (outcome == "won") if confirmed else None
+        result[stopped_key] = (outcome == "stopped") if confirmed else None
+        result[expired_key] = expired_pct if confirmed else None
+
+        cont_won_key = f"{prefix}_cont_{thresh}_won"
+        cont_stopped_key = f"{prefix}_cont_{thresh}_stopped"
+        cont_expired_key = f"{prefix}_cont_{thresh}_expired_pct"
+        result[cont_won_key] = (cont_outcome == "won") if confirmed else None
+        result[cont_stopped_key] = (cont_outcome == "stopped") if confirmed else None
+        result[cont_expired_key] = cont_expired_pct if confirmed else None
+
+    return result
+
+
 def download_intraday_data(symbol: str) -> pd.DataFrame:
-    """Download 60 days of 30-minute intraday data for a symbol."""
+    """Load 30-min intraday data — from local CSV if available, else Yahoo Finance."""
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "bars", f"{symbol}.csv")
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path, index_col="timestamp")
+        df.index = pd.to_datetime(df.index, utc=True)
+        df.index = df.index.tz_convert("America/New_York")
+        return df
+    # Fallback to Yahoo Finance (live/recent data)
     ticker = yf.Ticker(symbol)
     df = ticker.history(period="60d", interval="30m")
     df.index = df.index.tz_convert("America/New_York")
@@ -277,7 +442,7 @@ def analyze_symbol(symbol: str, output_dir: str = "output") -> list:
         for key, val in ret_12pm.items():
             row[f"12pm_{key}"] = val
 
-        # Wednesday intraday analysis for triggered timeframes
+        # Wednesday intraday analysis for triggered timeframes (90% retracement)
         if ret_mon2pm.get("retraced_90pct"):
             row.update(analyze_wednesday_intraday(
                 df, wed, prices["monday_2pm"], ret_mon2pm["move_direction"], "mon2pm"))
@@ -287,6 +452,21 @@ def analyze_symbol(symbol: str, output_dir: str = "output") -> list:
         if ret_12pm.get("retraced_90pct"):
             row.update(analyze_wednesday_intraday(
                 df, wed, prices["tuesday_12pm"], ret_12pm["move_direction"], "12pm"))
+
+        # Confirmation threshold analysis for all non-flat timeframes
+        # Scan from entry time through Wednesday close
+        if ret_mon2pm["move_direction"] != "flat":
+            row.update(analyze_confirmation_thresholds(
+                df, wed, prices["monday_2pm"], ret_mon2pm["move_direction"], "mon2pm",
+                scan_from_date=mon, scan_from_time="14:00"))
+        if ret_10am["move_direction"] != "flat":
+            row.update(analyze_confirmation_thresholds(
+                df, wed, prices["tuesday_10am"], ret_10am["move_direction"], "10am",
+                scan_from_date=tue, scan_from_time="10:00"))
+        if ret_12pm["move_direction"] != "flat":
+            row.update(analyze_confirmation_thresholds(
+                df, wed, prices["tuesday_12pm"], ret_12pm["move_direction"], "12pm",
+                scan_from_date=tue, scan_from_time="12:00"))
 
         results.append(row)
 
@@ -376,6 +556,46 @@ def _summarize_timeframe(all_results: list, prefix: str) -> dict:
         s = per_symbol[sym]
         s["hit_rate"] = round(s["hits"] / s["total"] * 100, 2) if s["total"] > 0 else 0
 
+    # Confirmation threshold stats (computed on ALL non-flat rows, not just 90% retracers)
+    confirmation = {}
+    for thresh in CONFIRMATION_THRESHOLDS:
+        reached_key = f"{prefix}_conf_{thresh}_reached"
+        won_key = f"{prefix}_conf_{thresh}_won"
+        stopped_key = f"{prefix}_conf_{thresh}_stopped"
+        expired_key = f"{prefix}_conf_{thresh}_expired_pct"
+        with_conf = [r for r in rows if reached_key in r]
+        reached = [r for r in with_conf if r.get(reached_key)]
+        won = [r for r in with_conf if r.get(won_key)]
+        stopped = [r for r in with_conf if r.get(stopped_key)]
+        expired = [r for r in with_conf if r.get(reached_key)
+                   and not r.get(won_key) and not r.get(stopped_key)]
+        expired_pcts = [r[expired_key] for r in expired if r.get(expired_key) is not None]
+        avg_expired_pct = round(float(np.mean(expired_pcts)), 2) if expired_pcts else 0
+        # Continuation trade stats
+        cont_won_key = f"{prefix}_cont_{thresh}_won"
+        cont_stopped_key = f"{prefix}_cont_{thresh}_stopped"
+        cont_expired_key = f"{prefix}_cont_{thresh}_expired_pct"
+        cont_won = [r for r in with_conf if r.get(cont_won_key)]
+        cont_stopped = [r for r in with_conf if r.get(cont_stopped_key)]
+        cont_expired = [r for r in with_conf if r.get(reached_key)
+                        and not r.get(cont_won_key) and not r.get(cont_stopped_key)]
+        cont_expired_pcts = [r[cont_expired_key] for r in cont_expired if r.get(cont_expired_key) is not None]
+        avg_cont_expired_pct = round(float(np.mean(cont_expired_pcts)), 2) if cont_expired_pcts else 0
+
+        confirmation[f"{thresh}%"] = {
+            "total": len(with_conf),
+            "confirmed": len(reached),
+            "confirmation_rate": round(len(reached) / len(with_conf) * 100, 2) if with_conf else 0,
+            "rev_win_rate": round(len(won) / len(reached) * 100, 2) if reached else 0,
+            "rev_stop_rate": round(len(stopped) / len(reached) * 100, 2) if reached else 0,
+            "rev_expired_rate": round(len(expired) / len(reached) * 100, 2) if reached else 0,
+            "rev_avg_expired_pct": avg_expired_pct,
+            "cont_win_rate": round(len(cont_won) / len(reached) * 100, 2) if reached else 0,
+            "cont_stop_rate": round(len(cont_stopped) / len(reached) * 100, 2) if reached else 0,
+            "cont_expired_rate": round(len(cont_expired) / len(reached) * 100, 2) if reached else 0,
+            "cont_avg_expired_pct": avg_cont_expired_pct,
+        }
+
     buckets = {"0-25%": 0, "25-50%": 0, "50-75%": 0, "75-90%": 0, "90-100%": 0, ">100%": 0}
     for pct in retrace_values:
         if pct > 100:
@@ -409,6 +629,7 @@ def _summarize_timeframe(all_results: list, prefix: str) -> dict:
         "target_hit_rates": target_hit_rates,
         "time_based": time_based,
         "per_symbol": per_symbol,
+        "confirmation": confirmation,
         "distribution": buckets,
     }
 
@@ -447,6 +668,7 @@ def print_summary(summary: dict):
     print("WEDNESDAY REVERSAL ANALYSIS — SUMMARY")
     print("=" * 60)
 
+    _print_timeframe_summary("Monday 2 PM", summary["mon2pm"])
     _print_timeframe_summary("Tuesday 10 AM", summary["10am"])
     _print_timeframe_summary("Tuesday 12 PM", summary["12pm"])
 

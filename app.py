@@ -280,6 +280,44 @@ for label, s in [("Mon 2 PM", sm), ("Tue 10 AM", s10), ("Tue 12 PM", s12)]:
     target_rows.append(row)
 st.dataframe(pd.DataFrame(target_rows), use_container_width=True, hide_index=True)
 
+# Confirmation threshold analysis
+st.subheader("Confirmation Threshold Analysis")
+st.caption("Wait for price to continue X% in the move direction before entering. Target = 2%, Stop = 1.5%.")
+
+thresholds = [f"{t}%" for t in [0.1, 0.2, 0.3, 0.4, 0.5]]
+
+conf_tab_rev, conf_tab_cont = st.tabs(["Reversal (fade the move)", "Continuation (ride the move)"])
+
+with conf_tab_rev:
+    rev_rows = []
+    for thresh in thresholds:
+        row = {"Threshold": thresh}
+        for label, s in [("Mon 2PM", sm), ("Tue 10AM", s10), ("Tue 12PM", s12)]:
+            conf = s.get("confirmation", {}).get(thresh, {})
+            row[f"{label} Conf%"] = f"{conf.get('confirmation_rate', 0)}%"
+            row[f"{label} Win%"] = f"{conf.get('rev_win_rate', 0)}%"
+            row[f"{label} Stop%"] = f"{conf.get('rev_stop_rate', 0)}%"
+            exp_rate = conf.get('rev_expired_rate', 0)
+            avg_pct = conf.get('rev_avg_expired_pct', 0)
+            row[f"{label} Exp%"] = f"{exp_rate}% (avg {avg_pct:+.1f}%)"
+        rev_rows.append(row)
+    st.dataframe(pd.DataFrame(rev_rows), use_container_width=True, hide_index=True)
+
+with conf_tab_cont:
+    cont_rows = []
+    for thresh in thresholds:
+        row = {"Threshold": thresh}
+        for label, s in [("Mon 2PM", sm), ("Tue 10AM", s10), ("Tue 12PM", s12)]:
+            conf = s.get("confirmation", {}).get(thresh, {})
+            row[f"{label} Conf%"] = f"{conf.get('confirmation_rate', 0)}%"
+            row[f"{label} Win%"] = f"{conf.get('cont_win_rate', 0)}%"
+            row[f"{label} Stop%"] = f"{conf.get('cont_stop_rate', 0)}%"
+            exp_rate = conf.get('cont_expired_rate', 0)
+            avg_pct = conf.get('cont_avg_expired_pct', 0)
+            row[f"{label} Exp%"] = f"{exp_rate}% (avg {avg_pct:+.1f}%)"
+        cont_rows.append(row)
+    st.dataframe(pd.DataFrame(cont_rows), use_container_width=True, hide_index=True)
+
 # Time-based reversal chart
 st.subheader("Median Reversal % Through Wednesday (triggered trades)")
 time_rows = []
