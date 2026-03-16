@@ -369,12 +369,34 @@ def analyze_confirmation_thresholds(df: pd.DataFrame, wednesday, entry_price: fl
 
 
 def download_intraday_data(symbol: str) -> pd.DataFrame:
-    """Load 30-min intraday data — from local CSV if available, else Yahoo Finance."""
+    """Load 30-min intraday data — from local CSV if available, else Yahoo Finance.
+
+    When a local CSV exists but is missing recent bars (e.g. today), appends
+    live data from Yahoo Finance to fill the gap.
+    """
     csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "bars", f"{symbol}.csv")
     if os.path.exists(csv_path):
         df = pd.read_csv(csv_path, index_col="timestamp")
         df.index = pd.to_datetime(df.index, utc=True)
         df.index = df.index.tz_convert("America/New_York")
+        # Append recent Yahoo data if CSV may be missing recent bars
+        from datetime import datetime
+        import pytz
+        now_et = datetime.now(pytz.timezone("America/New_York"))
+        last_bar_ts = df.index[-1]
+        stale_minutes = (now_et - last_bar_ts).total_seconds() / 60
+        if stale_minutes > 45:
+            try:
+                ticker = yf.Ticker(symbol)
+                live = ticker.history(period="5d", interval="30m")
+                if not live.empty:
+                    live.index = live.index.tz_convert("America/New_York")
+                    live = live[["Open", "High", "Low", "Close", "Volume"]]
+                    new_bars = live[live.index > df.index[-1]]
+                    if not new_bars.empty:
+                        df = pd.concat([df, new_bars])
+            except Exception:
+                pass
         return df
     # Fallback to Yahoo Finance (live/recent data)
     ticker = yf.Ticker(symbol)
